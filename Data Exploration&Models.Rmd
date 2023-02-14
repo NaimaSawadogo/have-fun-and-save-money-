@@ -1,0 +1,343 @@
+---
+title: "ML Project Short Report"
+author: "Naima Sawadogo"
+date: "2022-11-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(readr)
+library(caret)
+library(randomForest)
+library(ggplot2)
+data <- read.csv("ProcessedTicketData.txt")
+```
+
+Counting the number of NA's 
+```{r}
+sum(is.na.data.frame(data))
+dim(data)
+summary(data)
+nrow(data)
+
+```
+
+Using summary, we can that the categorical variable sold out is considered numerical so we need to transform that. 
+
+```{r}
+library(dplyr)
+my_data <- data %>% mutate_at( c("sold_out","event_id", "sk_artist_id"),  as.character)
+summary(my_data)
+summary(my_data$max_price)
+summary(my_data$face_value)
+library(plyr)
+count(my_data$sold_out)
+
+```
+
+##Looking at the response variable over_price
+
+```{r}
+my_data$over_price <- my_data$max_price/my_data$face_value
+g1 <- hist(my_data$over_price)
+g2 <- boxplot(my_data$over_price,
+  ylab = "overprice",
+  main = "Boxplot of overprice"
+)
+
+boxplot.stats(my_data$over_price)$out
+out <- boxplot.stats(my_data$over_price)$out
+out_ind <- which(my_data$over_price %in% c(out))
+out_ind
+```
+Looking at the histogram , the response variable over_price is extremely right skewed. A closer look to with a boxplot shows that it has a very high number of outliers. View the number of outliers, and the fact that we are building machine learning models, it will be wise to eliminate the outliers so we can better train the model 
+
+Eliminating the outliers 
+
+```{r}
+
+my_data <- my_data %>%  filter(!row_number() %in% out_ind)
+nrow(my_data)
+
+```
+
+##Looking at the relationship between over_price and different variables. 
+
+```{r}
+x <-my_data$total_postings
+y <- my_data$over_price
+g3 <- plot(x, y, main = "Total_postings vs over_price",
+           xlab = "Total_postings", ylab = "over_price",
+           pch = 19, frame = FALSE)
+abline(lm(y ~ x, data = my_data), col = "blue")
+g3
+```
+There a strong relationship between total_posting and overprice. 
+
+
+```{r}
+g4 <- boxplot(over_price~city, data = my_data, col= 'purple') 
+g4
+
+```
+
+Looking at the box plot, the median over_price of a ticket seem to vary very little between the different cities. One city though seems to be an outlier Miami. Next to it in Austin and New York.Note that Miami beach also have the widest distribution 
+
+Let's start fitting a model to our data. Before that, we can see that event_id and sk artist id are not explanatory variables so we will just drop those two columns. Since we used max price ad face value to create the explanatory variable, we should also drop those columns to prevent to prevent te explanatory variable from predictig against itself. 
+
+```{r}
+my_data_true <- subset(my_data, select = -c(event_id, sk_artist_id,min_price,max_price,face_value,maxPrice_FV_delta,FV_delta_log,FV_delta))
+ncol(my_data_true)
+summary(my_data_true)
+```
+Let's separate randomly the data into train data and test data
+
+```{r}
+set.seed(111111)
+total_obs <- dim(my_data_true)[1]
+# Data partition / Sample splitting
+train_data_indices <- sample(1:total_obs, 0.7*total_obs)
+train_data <- my_data_true[train_data_indices,]
+test_data <- my_data_true[-train_data_indices,]
+# Record the size of training data and test data
+train_obs <- dim(train_data)[1]
+test_obs <- dim(test_data)[1]
+```
+
+Let's build a first random forest model so we can use it to estimate the best parameters to use for the best fitter model. 
+Visualize   
+
+```{r}
+set.seed(111111)
+library(randomForest)
+rf_naive <- randomForest(over_price ~., # Set tree formula
+                       data = train_data, # Set dataset
+                       ntree = 1000, 
+                       importance=TRUE) # Set number of trees to use
+rf_naive # View model
+rf_pred <- predict(rf_naive,test_data, type = 'response')
+
+RMSE <- sqrt(sum((rf_pred - test_data$over_price)^2)/length(rf_pred))
+perc_mean_error <- print(RMSE/mean( test_data$over_price))
+```
+The rsme is 3.94 which is pretty high given that most values is our data set is between 1 and 7.
+Calculating the percent mean error, we can see that the rsme is 60% higher that the mean 0ver_price in the data. So we should tune our model to try and reduce that
+
+First let's find the best number of trees
+```{r}
+oob_error <- rf_naive$mse # Extract oob error
+plot_dat <- cbind.data.frame(rep(1:length(oob_error)), oob_error) # Create plot data
+names(plot_dat) <- c("trees", "oob_error") # Name plot data
+prediction = rf_naive$predicted
+
+
+# Plot oob error
+library(ggplot2)
+g_error_vs_tree <- ggplot(plot_dat, aes(x = trees, y = oob_error)) + # Set x as trees and y as error
+  geom_point(alpha = 0.5, color = "blue") + # Select geom point
+  geom_smooth() + # Add smoothing line
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "Error Rate v Number of Trees",
+       y = "Error Rate")  # Set labels
+g_error_vs_tree # Create plot
+```
+A low amount of tree seem to have a very hight number of error. But from this plot, it seems number of trees between 80 to a 100 will be more than enough
+
+Let's tune the our ramdom forest to find the best nodesize and mtry. 
+
+```{r}
+mtry_vals <- c(2, 4, 5, 7, 9, 12, 15, 17)
+
+nodesize_vals <- c(1, 10, 15, 50, 100, 150, 200, 500, 1000)
+
+params <- expand.grid(mtry_vals, nodesize_vals)
+names(params) <- c("mtry", "nodesize")
+acc_vec <- rep(NA, nrow(params))
+set.seed(11111)
+
+for(i in 1:nrow(params)){
+  rf_tuned <- randomForest(over_price ~., 
+                         data = train_data,
+                         ntree = 500,
+                         nodesize = params$nodesize[i],
+                         mtry = params$mtry[i]) 
+  acc_vec[i] <-rf_tuned$mse[length(rf_tuned$mse)] # Create predictions for bagging model
+}
+
+```
+
+
+Vizualization the results of the tuning so we choose the best combination of parameters 
+```{r}
+res_db <- cbind.data.frame(params,acc_vec)
+res_db$mtry <- as.factor(res_db$mtry) # Convert tree number to factor for plotting
+res_db$nodesize <- as.factor(res_db$nodesize) # Convert node size to factor for plotting
+g_1 <- ggplot(res_db, aes(y = mtry, x = nodesize, fill = acc_vec)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+    mid = "white", # Choose mid color
+    high = "red", # Choose high color
+    midpoint =mean(res_db$acc_vec), # Choose mid point
+    space = "Lab", 
+    na.value ="grey", # Choose NA value
+    guide = "colourbar", # Set color bar
+    aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Node Size", y = "mtry", fill = "Error") # Set labels
+g_1 # Generate plot
+
+#res_db[which.min(res_db$acc_vec),]
+```
+It seems like the best combination is 94 trees, 15 nodesize and and 5 mtry. With that in mind, let's build your best_forest 
+Things to do here. 
+Let's fit in our best model 
+
+```{r}
+set.seed(111111)
+rf_best <- randomForest(over_price ~., # Set tree formula
+                         data = train_data, # Set dataset
+                         ntree = 95,
+                         nodesize =10,
+                         mtry = 2, 
+                         importance = TRUE)
+#rf_best
+
+rf_pred_best <- predict(rf_best,test_data, type = 'response')
+#install.packages("Metrics")
+#library(Metrics)
+#rmse(test_data$over_price, rf_best)
+#
+RMSE <- sqrt(sum((rf_pred_best - test_data$over_price)^2)/length(rf_pred_best))
+print(RMSE)
+print(RMSE/mean( test_data$over_price))
+
+
+```
+It seems that even with a tuned data, the ramdom forest model is still performing poorly with the rsme still being more that 60% of the test data value.
+
+```{r}
+```
+Let's vizualize the variable importance
+```{r}
+library(ggplot2)
+ImpData <- as.data.frame(importance(rf_best))
+
+ImpData$Var.Names <- row.names(ImpData)
+
+#ImpData
+
+ggplot(ImpData, aes(x=Var.Names, y=`%IncMSE`)) +
+  geom_segment( aes(x=Var.Names, xend=Var.Names, y=0, yend=`%IncMSE`), color="skyblue") +
+  geom_point(aes(size = IncNodePurity), color="purple", alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    legend.position="bottom",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank())+ggtitle('Variable Importance')
+```
+As you can seem, variables like total_number of tickets, the total posting as well as the number of news and number of blogs are most influencial variables. 
+
+
+Catboost 
+
+```{r}
+# Load library
+library(catboost)
+
+```
+
+
+Separate labels and features
+```{r}
+ncol(train_data)
+features <- train_data[,c(2:17)]
+labels <- train_data$over_price
+
+```
+
+# Convert character values to factors
+```{r}
+str(features)
+features$artist <- as.factor(features$artist)
+features$venue <- as.factor(features$venue)
+features$city <- as.factor(features$city)
+features$state <- as.factor(features$state)
+features$ticket_vendor <- as.factor(features$ticket_vendor)
+features$sold_out <- as.numeric(features$sold_out)
+```
+Create training data
+```{r}
+train_pool <- catboost.load_pool(data = features, label = labels)
+```
+
+Run model
+
+```{r}
+model <- catboost.train(train_pool,  NULL,
+params = list(iterations = 100, metric_period=10))
+```
+
+Extract test data
+```{r}
+features_t <- test_data[,c(2:17)]
+labels_t <- test_data$over_price
+```
+
+Convert character features to factors
+
+```{r}
+features_t$artist <- as.factor(features_t$artist)
+features_t$venue <- as.factor(features_t$venue)
+features_t$city <- as.factor(features_t$city)
+features_t$state <- as.factor(features_t$state)
+features_t$ticket_vendor <- as.factor(features_t$ticket_vendor)
+features_t$sold_out <- as.numeric(features_t$sold_out)
+```
+
+Set up data and produce predictions
+
+```{r}
+
+real_pool <- catboost.load_pool(features_t)
+
+prediction <- catboost.predict(model, real_pool)
+```
+
+View accuracy of predictions
+
+```{r}
+library(Metrics)
+rmse(test_data$over_price, prediction)
+print(RMSE/mean( test_data$over_price))
+```
+View feature importance
+```{r}
+catboost_importance <- catboost.get_feature_importance(model,
+                                pool = NULL,
+                                type = 'FeatureImportance',
+                                thread_count = -1)
+catboost_importance
+```
+With an RSME of 4, the cat boost model is seems to be less reliable than our ramdom forest. So let's continue our variables predictions using random forest. First, let's bind our predicted values form the ramdom forest model our data set
+
+```{r}
+rf_best$predicted
+train_data_pred <- cbind(train_data,rf_best$predicted)
+names(train_data_pred)[names(train_data_pred) == "rf_best$predicted"] <- "Predicted"
+
+mean(train_data_pred$Predicted)
+mean(test_data$over_price)
+mean(train_data$over_price)
+
+```
